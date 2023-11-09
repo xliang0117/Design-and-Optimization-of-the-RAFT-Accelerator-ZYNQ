@@ -4,4 +4,4 @@
 
   2. 不同分支对应不同的内容
 
-  - fullQuantize: 对权重和激活值都进行了量化
+  - prediction：包含了统计预测准确率的代码-prediction.py
