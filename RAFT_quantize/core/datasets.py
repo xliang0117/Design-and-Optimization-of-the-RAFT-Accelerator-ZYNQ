@@ -117,6 +117,19 @@ class MpiSintel(FlowDataset):
             if split != 'test':
                 self.flow_list += sorted(glob(osp.join(flow_root, scene, '*.flo')))
 
+class Middlebury(FlowDataset):
+    def __init__(self, aug_params=None, root='datasets/Middlebury', scene='Dimetrodon'):
+        super(Middlebury, self).__init__(aug_params)
+        flow_root = osp.join(root, 'other-gt-flow')
+        image_root = osp.join(root, "other-data")
+
+        image_list = sorted(glob(osp.join(image_root, scene, '*.png')))
+        for i in range(len(image_list)-1):
+            self.image_list += [ [image_list[i], image_list[i+1]] ]
+            self.extra_info += [ (scene, i) ] # scene and frame_id
+
+            self.flow_list += sorted(glob(osp.join(flow_root, scene, '*.flo')))
+
 
 class FlyingChairs(FlowDataset):
     def __init__(self, aug_params=None, split='train', root='datasets/FlyingChairs_release/data'):
@@ -135,27 +148,32 @@ class FlyingChairs(FlowDataset):
 
 
 class FlyingThings3D(FlowDataset):
-    def __init__(self, aug_params=None, root='datasets/FlyingThings3D', dstype='frames_cleanpass'):
+    def __init__(self, aug_params=None, root='datasets/FlyingThingsSubset', dstype=""):
         super(FlyingThings3D, self).__init__(aug_params)
 
-        for cam in ['left']:
-            for direction in ['into_future', 'into_past']:
-                image_dirs = sorted(glob(osp.join(root, dstype, 'TRAIN/*/*')))
-                image_dirs = sorted([osp.join(f, cam) for f in image_dirs])
+        for view in ['left', 'right']:
+            image_root = osp.join(root, 'train/image_clean', view)
+            flow_root_forward = osp.join(root, 'train/flow', view, 'into_future')
+            flow_root_backward = osp.join(root, 'train/flow/', view, 'into_past')
 
-                flow_dirs = sorted(glob(osp.join(root, 'optical_flow/TRAIN/*/*')))
-                flow_dirs = sorted([osp.join(f, direction, cam) for f in flow_dirs])
+            image_list = sorted(os.listdir(image_root))
+            flow_forward = set(os.listdir(flow_root_forward))
+            flow_backward = set(os.listdir(flow_root_backward))
 
-                for idir, fdir in zip(image_dirs, flow_dirs):
-                    images = sorted(glob(osp.join(idir, '*.png')) )
-                    flows = sorted(glob(osp.join(fdir, '*.pfm')) )
-                    for i in range(len(flows)-1):
-                        if direction == 'into_future':
-                            self.image_list += [ [images[i], images[i+1]] ]
-                            self.flow_list += [ flows[i] ]
-                        elif direction == 'into_past':
-                            self.image_list += [ [images[i+1], images[i]] ]
-                            self.flow_list += [ flows[i+1] ]
+            for i in range(len(image_list)-1):
+                img1 = image_list[i]
+                img2 = image_list[i+1]
+
+                image_path1 = osp.join(image_root, img1)
+                image_path2 = osp.join(image_root, img2)
+
+                if img1.replace('.png', '.flo') in flow_forward:
+                    self.image_list += [ [image_path1, image_path2] ]
+                    self.flow_list += [ osp.join(flow_root_forward, img1.replace('.png', '.flo')) ]
+
+                if img2.replace('.png', '.flo') in flow_backward:
+                    self.image_list += [ [image_path2, image_path1] ]
+                    self.flow_list += [ osp.join(flow_root_backward, img2.replace('.png', '.flo')) ]
       
 
 class KITTI(FlowDataset):
@@ -228,7 +246,7 @@ def fetch_dataloader(args, TRAIN_DS='C+T+K+S+H'):
         train_dataset = KITTI(aug_params, split='training')
 
     train_loader = data.DataLoader(train_dataset, batch_size=args.batch_size, 
-        pin_memory=False, shuffle=True, num_workers=4, drop_last=True)
+        pin_memory=False, shuffle=True, num_workers=4, persistent_workers=True, drop_last=True)
 
     print('Training with %d image pairs' % len(train_dataset))
     return train_loader

@@ -19,6 +19,8 @@ from raft import RAFT
 import evaluate
 import datasets
 
+from brevitas.export import export_brevitas_onnx
+
 from torch.utils.tensorboard import SummaryWriter
 
 try:
@@ -135,7 +137,7 @@ class Logger:
 
 def train(args):
 
-    model = nn.DataParallel(RAFT(args), device_ids=args.gpus)
+    model = RAFT(args)
     print("Parameter Count: %d" % count_parameters(model))
 
     if args.restore_ckpt is not None:
@@ -145,7 +147,7 @@ def train(args):
     model.train()
 
     if args.stage != 'chairs':
-        model.module.freeze_bn()
+        model.freeze_bn()
 
     train_loader = datasets.fetch_dataloader(args)
     optimizer, scheduler = fetch_optimizer(args, model)
@@ -173,38 +175,44 @@ def train(args):
                 image1 = (image1 + stdv * torch.randn(*image1.shape).cuda()).clamp(0.0, 255.0)
                 image2 = (image2 + stdv * torch.randn(*image2.shape).cuda()).clamp(0.0, 255.0)
 
-            flow_predictions = model(image1, image2, iters=args.iters)            
+            # with torch.autograd.detect_anomaly():
+            images = torch.cat((image1, image2), dim=0)
+            flow_predictions = model(images, iters=args.iters)            
 
             loss, metrics = sequence_loss(flow_predictions, flow, valid, args.gamma)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)                
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
-            
+        
             scaler.step(optimizer)
             scheduler.step()
             scaler.update()
-            firstTime = False
 
             logger.push(metrics)
+            print(".", end="")
 
             if total_steps % VAL_FREQ == VAL_FREQ - 1:
                 PATH = 'checkpoints/%d_%s.pth' % (total_steps+1, args.name)
+                export_brevitas_onnx(model, input_t=images, export_path="checkpoints/onnx_model.onnx")
                 torch.save(model.state_dict(), PATH)
-
                 results = {}
                 for val_dataset in args.validation:
                     if val_dataset == 'chairs':
-                        results.update(evaluate.validate_chairs(model.module))
+                        results.update(evaluate.validate_chairs(model))
                     elif val_dataset == 'sintel':
-                        results.update(evaluate.validate_sintel(model.module))
+                        results.update(evaluate.validate_sintel(model))
                     elif val_dataset == 'kitti':
-                        results.update(evaluate.validate_kitti(model.module))
+                        results.update(evaluate.validate_kitti(model))
+                    elif val_dataset == 'middlebury':
+                        results.update(evaluate.validate_middlebury(model))
+                if total_steps == args.num_steps-1:
+                    evaluate.validate_sintel(model, hist=True)
 
                 logger.write_dict(results)
                 
                 model.train()
                 if args.stage != 'chairs':
-                    model.module.freeze_bn()
+                    model.freeze_bn()
             
             total_steps += 1
 
@@ -241,6 +249,7 @@ if __name__ == '__main__':
     parser.add_argument('--dropout', type=float, default=0.0)
     parser.add_argument('--gamma', type=float, default=0.8, help='exponential weighting')
     parser.add_argument('--add_noise', action='store_true')
+    parser.add_argument('--del_norm', action='store_true', help='delete norm layer')
     args = parser.parse_args()
 
     torch.manual_seed(1234)

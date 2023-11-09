@@ -34,12 +34,10 @@ class RAFT(nn.Module):
         args.corr_radius = 3
     
 
-        if 'dropout' not in self.args:
-            self.args.dropout = 0
-
         # feature network, context network, and update block
-        self.fnet = SmallEncoder(output_dim=128, norm_fn='batch', dropout=args.dropout)        
-        self.cnet = SmallEncoder(output_dim=hdim+cdim, norm_fn='none', dropout=args.dropout)
+        fnet_norm = 'none' if args.del_norm else 'batch'
+        self.fnet = SmallEncoder(output_dim=64, norm_fn=fnet_norm)        
+        self.cnet = SmallEncoder(output_dim=hdim+cdim, norm_fn='none')
         self.update_block = SmallUpdateBlock(self.args, hidden_dim=hdim)
 
     def freeze_bn(self):
@@ -56,25 +54,15 @@ class RAFT(nn.Module):
         # optical flow computed as difference: flow = coords1 - coords0
         return coords0, coords1
 
-    def upsample_flow(self, flow, mask):
-        """ Upsample flow field [H/8, W/8, 2] -> [H, W, 2] using convex combination """
-        N, _, H, W = flow.shape
-        mask = mask.view(N, 1, 9, 8, 8, H, W)
-        mask = torch.softmax(mask, dim=2)
 
-        up_flow = F.unfold(8 * flow, [3,3], padding=1)
-        up_flow = up_flow.view(N, 2, 9, 1, 1, H, W)
-
-        up_flow = torch.sum(mask * up_flow, dim=2)
-        up_flow = up_flow.permute(0, 1, 4, 2, 5, 3)
-        return up_flow.reshape(N, 2, 8*H, 8*W)
-
-
-    def forward(self, image1, image2, iters=1, flow_init=None, upsample=True, test_mode=False):
+    def forward(self, images, iters=1, flow_init=None, upsample=True, test_mode=False):
         """ Estimate optical flow between pair of frames """
-        
-        image1 = 2 * (image1 / 255.0) - 1.0
-        image2 = 2 * (image2 / 255.0) - 1.0
+
+        batch_dim = images.shape[0] // 2
+        images = torch.split(images, [batch_dim, batch_dim], dim=0)
+
+        image1 = 2 * (images[0] / 255.0) - 1.0
+        image2 = 2 * (images[1] / 255.0) - 1.0
 
         image1 = image1.contiguous()    # make the tensor contiguous in memory
         image2 = image2.contiguous()
@@ -105,6 +93,7 @@ class RAFT(nn.Module):
 
         if flow_init is not None:
             coords1 = coords1 + flow_init
+        # coords1 = coords1 + (2**1e-8)
 
         flow_predictions = []
         for itr in range(iters):
@@ -116,18 +105,22 @@ class RAFT(nn.Module):
             with autocast(enabled=self.args.mixed_precision):
                 net, up_mask, delta_flow = self.update_block(net, inp, corr, flow)
 
+            # get frequency of flow
+            if test_mode:
+                delta_coords = torch.floor(coords1 + delta_flow) - torch.floor(coords1) # if itr != 0 else torch.zeros(coords1.shape)
+                delta_coords = torch.sum(torch.abs(delta_coords), dim=1)
+                histOutOriginalflow, rangeBin = np.histogram(delta_coords.cpu(), bins=(0,1,2,3,4,5,6,7,8,9,10,100))
+                # print("origin:{}".format(histOutOriginalflow))
+
             # F(t+1) = F(t) + \Delta(t)
             coords1 = coords1 + delta_flow
 
             # upsample predictions
-            if up_mask is None:
-                flow_up = upflow8(coords1 - coords0)
-            else:
-                flow_up = self.upsample_flow(coords1 - coords0, up_mask)
-            
+            flow_up = upflow8(coords1 - coords0)
+
             flow_predictions.append(flow_up)
 
         if test_mode:
-            return coords1 - coords0, flow_up
+            return coords1 - coords0, flow_up, histOutOriginalflow
             
         return flow_predictions
