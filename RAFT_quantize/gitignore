@@ -1,0 +1,9 @@
+__pycache__
+checkpoints
+datasets
+runs
+models
+*.bin
+*.pt
+gemmini/raft.c
+gemmini/raft_params.h
